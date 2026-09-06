@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { createSign } from "node:crypto";
+import express from "express";
 import pkg from "@slack/bolt";
 import { WebClient } from "@slack/web-api";
 import nodeIcal from "node-ical";
@@ -774,6 +775,36 @@ async function main() {
   ) {
     const results = await postDueEvents(webClient);
     console.log(JSON.stringify(results, null, 2));
+    return;
+  }
+
+  if (
+    process.argv.includes("--serve") ||
+    process.env.POST_TRIGGER_ENABLED === "1"
+  ) {
+    const app = express();
+    app.get("/health", (_req, res) => {
+      res.json({ ok: true, mode: "trigger" });
+    });
+
+    const triggerHandler = async (_req, res) => {
+      try {
+        const results = await postDueEvents(webClient);
+        res.json({ ok: true, results });
+      } catch (err) {
+        console.error("Trigger post failed", err);
+        res.status(500).json({ error: err.message || String(err) });
+      }
+    };
+
+    app.post("/trigger/post", triggerHandler);
+    app.post("/trigger-post", triggerHandler);
+    app.post("/post-now", triggerHandler);
+
+    const port = Number(process.env.PORT || 3000);
+    app.listen(port, () => {
+      console.log(`HTTP trigger server listening on :${port}`);
+    });
     return;
   }
 
