@@ -645,7 +645,8 @@ function dueOnDay(events, route, day) {
         return start.hasSame(day, "day") && start >= day.startOf("day");
       })
       .map((occurrence) => {
-        const duration = new Date(event.end).getTime() - new Date(event.start).getTime();
+        const duration =
+          new Date(event.end).getTime() - new Date(event.start).getTime();
         return {
           ...event,
           uid: `${event.uid}#${occurrence.toISOString()}`,
@@ -953,12 +954,7 @@ async function main() {
   }
 }
 
-export {
-  main,
-  parseAvailabilityRows,
-  isUserUnavailableForEvent,
-  dueOnDay,
-};
+export { main, parseAvailabilityRows, isUserUnavailableForEvent, dueOnDay };
 
 const isDirectRun =
   process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
