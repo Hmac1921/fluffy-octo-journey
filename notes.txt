@@ -1,0 +1,4 @@
+Notes:
+- DB must be reachable from this app via DATABASE_URL in .env
+- Ensure pgcrypto or uuid extension if you want server-side gen_random_uuid()
+- Create initial teams/roles in DB for testing

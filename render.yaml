@@ -1,0 +1,27 @@
+services:
+  - type: cron_job
+    name: slack-calendar-post
+    env: node
+    plan: free
+    schedule: "0 09 * * *"
+    region: oregon
+    buildCommand: "pnpm install --frozen-lockfile || true"
+    startCommand: "bash scripts/run_post.sh"
+    timeout: 3600
+    envVars:
+      - key: KLUBRAUM_ICS_URL
+        sync: false
+      - key: FWIP_CHANNEL_ID
+        sync: false
+      - key: BTEAM_CHANNEL_ID
+        sync: false
+      - key: FWIP_FILTER
+        sync: false
+      - key: BTEAM_FILTER
+        sync: false
+      - key: SLACK_BOT_TOKEN
+        sync: false
+      - key: SLACK_APP_TOKEN
+        sync: false
+      - key: TZ
+        sync: false

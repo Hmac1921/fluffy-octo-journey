@@ -1,0 +1,46 @@
+{
+  "name": "slack-club-calendar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "start:nodb": "node src/no_db_calendar.js",
+    "dev:nodb": "nodemon src/no_db_calendar.js",
+    "post:nodb": "node src/no_db_calendar.js --post-now",
+    "dry-run:nodb": "node src/no_db_calendar.js --dry-run",
+    "dry-run:tomorrow:nodb": "node src/no_db_calendar.js --dry-run --days-ahead=1",
+    "setup": "pnpm install && cd client && pnpm install",
+    "client:dev": "cd client && pnpm dev",
+    "start:ts": "node src/index.js",
+    "dev:ts": "nodemon src/index.js",
+    "migrate": "node scripts/migrate.js",
+    "seed": "node scripts/seed.js",
+    "gen-token": "node scripts/generate_token.js",
+    "health": "node scripts/check_health.js"
+  },
+  "dependencies": {
+    "@slack/bolt": "^4.6.0",
+    "@slack/web-api": "^7.13.0",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "ical-generator": "^10.0.0",
+    "node-ical": "^0.27.1",
+    "node-cron": "^3.0.2",
+    "luxon": "^3.7.2",
+    "pg": "^8.16.3",
+    "rrule": "^2.8.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14",
+    "ts-node": "^10.9.1",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.4.2",
+    "@types/express": "^4.17.17",
+    "@types/node": "^20.4.2",
+    "@types/pg": "^8.6.6",
+    "tsx": "^3.12.7"
+  }
+}

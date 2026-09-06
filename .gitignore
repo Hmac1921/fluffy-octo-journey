@@ -1,0 +1,6 @@
+node_modules/
+client/dist/
+data/
+.DS_Store
+.env 
+.env.example

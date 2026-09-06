@@ -1,0 +1,10 @@
+body {
+  margin: 0;
+}
+#root {
+  min-height: 100vh;
+  background: #f7f7fb;
+}
+h1 {
+  color: #111827;
+}
