@@ -1,6 +1,7 @@
 import "dotenv/config";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { createSign } from "node:crypto";
 import pkg from "@slack/bolt";
 import { WebClient } from "@slack/web-api";
@@ -30,6 +31,7 @@ const ATTENDANCE_HEADERS = [
   "channel_id",
   "message_ts",
 ];
+const AVAILABILITY_HEADERS = ["slack_user_id", "weekday", "reason", "active"];
 const GOOGLE_SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
 let googleAccessToken = null;
 
@@ -113,8 +115,9 @@ function parseCsvLine(line) {
 function googleSheetsEnabled() {
   return Boolean(
     process.env.GOOGLE_SHEETS_SPREADSHEET_ID &&
-      (process.env.GOOGLE_SERVICE_ACCOUNT_JSON ||
-        (process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL && process.env.GOOGLE_PRIVATE_KEY)),
+    (process.env.GOOGLE_SERVICE_ACCOUNT_JSON ||
+      (process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL &&
+        process.env.GOOGLE_PRIVATE_KEY)),
   );
 }
 
@@ -180,7 +183,9 @@ async function googleToken() {
   });
   const json = await response.json();
   if (!response.ok) {
-    throw new Error(`Google auth failed: ${json.error_description || json.error}`);
+    throw new Error(
+      `Google auth failed: ${json.error_description || json.error}`,
+    );
   }
 
   googleAccessToken = {
@@ -277,7 +282,9 @@ async function readSheetAttendance() {
   const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
   await ensureGoogleSheet();
   const range = encodeURIComponent(sheetRange("A:K"));
-  const values = await googleFetch(`/spreadsheets/${spreadsheetId}/values/${range}`);
+  const values = await googleFetch(
+    `/spreadsheets/${spreadsheetId}/values/${range}`,
+  );
   return sheetRowsFromValues(values.values || [ATTENDANCE_HEADERS]);
 }
 
@@ -286,7 +293,9 @@ async function upsertSheetAttendance(entry) {
   await ensureGoogleSheet();
 
   const range = encodeURIComponent(sheetRange("A:K"));
-  const values = await googleFetch(`/spreadsheets/${spreadsheetId}/values/${range}`);
+  const values = await googleFetch(
+    `/spreadsheets/${spreadsheetId}/values/${range}`,
+  );
   const rows = sheetRowsFromValues(values.values || [ATTENDANCE_HEADERS]);
   const existingIndex = rows.findIndex(
     (row) =>
@@ -311,7 +320,9 @@ async function upsertSheetAttendance(entry) {
 
   if (existingIndex >= 0) {
     const sheetRowNumber = existingIndex + 2;
-    const updateRange = encodeURIComponent(sheetRange(`A${sheetRowNumber}:K${sheetRowNumber}`));
+    const updateRange = encodeURIComponent(
+      sheetRange(`A${sheetRowNumber}:K${sheetRowNumber}`),
+    );
     await googleFetch(
       `/spreadsheets/${spreadsheetId}/values/${updateRange}?valueInputOption=USER_ENTERED`,
       {
@@ -332,18 +343,131 @@ async function upsertSheetAttendance(entry) {
   return { action: "created" };
 }
 
+function normalizeWeekdayKey(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  const map = {
+    mon: "monday",
+    monday: "monday",
+    tue: "tuesday",
+    tues: "tuesday",
+    tuesday: "tuesday",
+    wed: "wednesday",
+    weds: "wednesday",
+    wednesday: "wednesday",
+    thu: "thursday",
+    thurs: "thursday",
+    thursday: "thursday",
+    fri: "friday",
+    friday: "friday",
+    sat: "saturday",
+    saturday: "saturday",
+    sun: "sunday",
+    sunday: "sunday",
+  };
+  return map[key] || key;
+}
+
+function parseAvailabilityRows(text) {
+  const source = String(text || "").trim();
+  if (!source) return [];
+
+  const lines = source.split(/\r?\n/).filter(Boolean);
+  if (lines.length <= 1) return [];
+
+  const headers = parseCsvLine(lines[0]).map((header) =>
+    header.trim().toLowerCase(),
+  );
+  return lines
+    .slice(1)
+    .map((line) => {
+      const values = parseCsvLine(line);
+      const row = Object.fromEntries(
+        headers.map((header, index) => [header, values[index] || ""]),
+      );
+
+      const activeValue = String(row.active ?? "")
+        .trim()
+        .toLowerCase();
+      return {
+        slack_user_id: String(row.slack_user_id || "").trim(),
+        weekday: String(row.weekday || "").trim(),
+        reason: String(row.reason || "").trim(),
+        active:
+          activeValue === "yes" ||
+          activeValue === "true" ||
+          activeValue === "1" ||
+          activeValue === "y" ||
+          activeValue === "on",
+      };
+    })
+    .filter((row) => row.slack_user_id && row.weekday);
+}
+
+function isUserUnavailableForEvent(slackUserId, eventStartIso, rows = []) {
+  if (!slackUserId || !eventStartIso) return false;
+
+  const eventWeekday = DateTime.fromISO(eventStartIso, { zone: "utc" })
+    .setZone(TZ)
+    .weekdayLong.toLowerCase();
+
+  return rows.some((row) => {
+    if (String(row.slack_user_id).trim() !== String(slackUserId).trim())
+      return false;
+    if (!row.active) return false;
+    return (
+      normalizeWeekdayKey(row.weekday) === normalizeWeekdayKey(eventWeekday)
+    );
+  });
+}
+
 async function ensureDataFiles() {
   await fs.mkdir(DATA_DIR, { recursive: true });
   try {
     await fs.access(ATTENDANCE_PATH);
   } catch {
-    await fs.writeFile(ATTENDANCE_PATH, `${ATTENDANCE_HEADERS.join(",")}\n`, "utf8");
+    await fs.writeFile(
+      ATTENDANCE_PATH,
+      `${ATTENDANCE_HEADERS.join(",")}\n`,
+      "utf8",
+    );
   }
   try {
     await fs.access(POSTS_PATH);
   } catch {
     await fs.writeFile(POSTS_PATH, "{}\n", "utf8");
   }
+  try {
+    await fs.access(path.join(DATA_DIR, "availability.csv"));
+  } catch {
+    await fs.writeFile(
+      path.join(DATA_DIR, "availability.csv"),
+      `${AVAILABILITY_HEADERS.join(",")}\n`,
+      "utf8",
+    );
+  }
+}
+
+async function readAvailabilityRules() {
+  await ensureDataFiles();
+  const availabilityPath = path.join(DATA_DIR, "availability.csv");
+  const text = await fs.readFile(availabilityPath, "utf8");
+  return parseAvailabilityRows(text);
+}
+
+async function writeAvailabilityRules(rows) {
+  await ensureDataFiles();
+  const availabilityPath = path.join(DATA_DIR, "availability.csv");
+  const lines = [
+    AVAILABILITY_HEADERS.join(","),
+    ...rows.map((row) =>
+      AVAILABILITY_HEADERS.map((header) => csvEscape(row[header] ?? "")).join(
+        ",",
+      ),
+    ),
+  ];
+  await fs.writeFile(availabilityPath, `${lines.join("\n")}\n`, "utf8");
 }
 
 async function readAttendance() {
@@ -667,13 +791,22 @@ async function main() {
     const userId = body.user?.id;
     if (!payload.event_uid || !payload.status || !userId) return;
 
+    const availabilityRules = await readAvailabilityRules();
+    const forcedStatus = isUserUnavailableForEvent(
+      userId,
+      payload.event_start,
+      availabilityRules,
+    )
+      ? "no"
+      : payload.status;
+
     const name = await slackName(client, userId, body.user?.name);
     await upsertAttendance({
       event_uid: payload.event_uid,
       event_title: payload.event_title,
       event_start: payload.event_start,
       group: payload.group,
-      status: payload.status,
+      status: forcedStatus,
       slack_user_id: userId,
       name,
       channel_id: body.channel?.id || "",
@@ -723,9 +856,16 @@ async function main() {
   }
 }
 
-try {
-  await main();
-} catch (err) {
-  console.error(err.message || err);
-  process.exit(1);
+export { parseAvailabilityRows, isUserUnavailableForEvent };
+
+const isDirectRun =
+  process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;
+
+if (isDirectRun) {
+  try {
+    await main();
+  } catch (err) {
+    console.error(err.message || err);
+    process.exit(1);
+  }
 }
