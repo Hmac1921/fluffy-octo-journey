@@ -594,6 +594,12 @@ function eventUid(key, event) {
   return [event.uid || key, recurrenceId].filter(Boolean).join("#");
 }
 
+function isExcludedOccurrence(event, occurrence) {
+  return Object.values(event.exdate || {}).some(
+    (excluded) => new Date(excluded).getTime() === occurrence.getTime(),
+  );
+}
+
 async function fetchKlubraumEvents() {
   requireEnv("KLUBRAUM_ICS_URL");
   let parsed;
@@ -619,10 +625,34 @@ async function fetchKlubraumEvents() {
 }
 
 function dueOnDay(events, route, day) {
-  return events.filter((event) => {
-    if (!matchesRoute(event.raw, route)) return false;
-    const start = DateTime.fromISO(event.start, { zone: "utc" }).setZone(TZ);
-    return start.hasSame(day, "day") && start >= day.startOf("day");
+  const dayStart = day.startOf("day").toUTC().toJSDate();
+  const dayEnd = day.endOf("day").toUTC().toJSDate();
+
+  return events.flatMap((event) => {
+    if (!matchesRoute(event.raw, route)) return [];
+
+    const occurrences = event.raw.rrule
+      ? event.raw.rrule
+          .between(dayStart, dayEnd, true)
+          .filter((occurrence) => !isExcludedOccurrence(event.raw, occurrence))
+      : [new Date(event.start)];
+
+    return occurrences
+      .filter((occurrence) => {
+        const start = DateTime.fromJSDate(occurrence, { zone: "utc" }).setZone(
+          TZ,
+        );
+        return start.hasSame(day, "day") && start >= day.startOf("day");
+      })
+      .map((occurrence) => {
+        const duration = new Date(event.end).getTime() - new Date(event.start).getTime();
+        return {
+          ...event,
+          uid: `${event.uid}#${occurrence.toISOString()}`,
+          start: occurrence.toISOString(),
+          end: new Date(occurrence.getTime() + duration).toISOString(),
+        };
+      });
   });
 }
 
@@ -923,7 +953,12 @@ async function main() {
   }
 }
 
-export { main, parseAvailabilityRows, isUserUnavailableForEvent };
+export {
+  main,
+  parseAvailabilityRows,
+  isUserUnavailableForEvent,
+  dueOnDay,
+};
 
 const isDirectRun =
   process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;

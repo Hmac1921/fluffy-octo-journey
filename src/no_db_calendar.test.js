@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { DateTime } from "luxon";
 
 import {
   parseAvailabilityRows,
   isUserUnavailableForEvent,
+  dueOnDay,
 } from "./no_db_calendar.js";
 
 test("parseAvailabilityRows reads valid availability rows", () => {
@@ -50,4 +52,33 @@ test("isUserUnavailableForEvent matches weekday overrides case-insensitively", (
     isUserUnavailableForEvent("U999", "2026-09-09T19:00:00Z", rows),
     false,
   );
+});
+
+test("dueOnDay expands non-excluded recurring events", () => {
+  const recurringEvent = {
+    uid: "training-series",
+    title: "Training B-Team",
+    start: "2026-08-09T10:30:00.000Z",
+    end: "2026-08-09T12:30:00.000Z",
+    raw: {
+      summary: "Training B-Team",
+      rrule: {
+        between(start, end) {
+          return [new Date("2026-09-06T10:30:00.000Z")].filter(
+            (occurrence) => occurrence >= start && occurrence <= end,
+          );
+        },
+      },
+      exdate: {},
+    },
+  };
+
+  const events = dueOnDay(
+    [recurringEvent],
+    { filter: "b-team" },
+    DateTime.fromISO("2026-09-06", { zone: "Europe/Stockholm" }),
+  );
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].start, "2026-09-06T10:30:00.000Z");
 });
