@@ -35,6 +35,8 @@ const ATTENDANCE_HEADERS = [
 const AVAILABILITY_HEADERS = ["slack_user_id", "weekday", "reason", "active"];
 const GOOGLE_SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
 let googleAccessToken = null;
+let httpServer = null;
+let keepAliveTimer = null;
 
 const ROUTES = [
   {
@@ -802,9 +804,11 @@ async function main() {
     app.post("/post-now", triggerHandler);
 
     const port = Number(process.env.PORT || 3000);
-    app.listen(port, () => {
+    httpServer = app.listen(port, () => {
       console.log(`HTTP trigger server listening on :${port}`);
+      console.log("Use POST /trigger/post to post today's due events");
     });
+    keepAliveTimer = setInterval(() => {}, 60 * 60 * 1000);
     return;
   }
 
@@ -887,7 +891,7 @@ async function main() {
   }
 }
 
-export { parseAvailabilityRows, isUserUnavailableForEvent };
+export { main, parseAvailabilityRows, isUserUnavailableForEvent };
 
 const isDirectRun =
   process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url;

@@ -136,9 +136,11 @@ to `BTEAM_CHANNEL_ID`.
 
 Render deployment:
 
+- Web service HTTP trigger: `node no_db_calendar.js --serve`
 - Cron job for posting only: `npm run post:nodb`
 - Background worker for Slack RSVP buttons: `npm run start:nodb`
 
-A Render cron job exits after posting, so it cannot receive button clicks later.
-Keep the Socket Mode worker running if you want Google Sheet updates from Slack
+The web service exposes `GET /health` and `POST /trigger/post`. A Render cron
+job exits after posting, so it cannot receive button clicks later. Keep the
+Socket Mode worker running if you want Google Sheet updates from Slack
 responses.
