@@ -59,6 +59,12 @@ function requireEnv(name) {
   }
 }
 
+function triggerAllowed(req) {
+  const secret = process.env.TRIGGER_SECRET;
+  if (!secret) return false;
+  return req.get("X-TRIGGER-SECRET") === secret || req.query.secret === secret;
+}
+
 function argValue(name) {
   const prefix = `--${name}=`;
   const match = process.argv.find((arg) => arg.startsWith(prefix));
@@ -785,12 +791,31 @@ async function main() {
     process.env.POST_TRIGGER_ENABLED === "1"
   ) {
     const app = express();
+    const infoHandler = (_req, res) => {
+      res.json({
+        ok: true,
+        service: "slack-club-calendar-no-db",
+        endpoints: {
+          health: "GET /health",
+          post: "GET or POST /trigger/post?secret=...",
+        },
+      });
+    };
+
+    app.get("/", infoHandler);
     app.get("/health", (_req, res) => {
       res.json({ ok: true, mode: "trigger" });
     });
 
-    const triggerHandler = async (_req, res) => {
+    const triggerHandler = async (req, res) => {
       try {
+        if (!triggerAllowed(req)) {
+          return res.status(401).json({
+            error: "unauthorized",
+            message:
+              "Set TRIGGER_SECRET and pass it as X-TRIGGER-SECRET or ?secret=...",
+          });
+        }
         const results = await postDueEvents(webClient);
         res.json({ ok: true, results });
       } catch (err) {
@@ -800,8 +825,15 @@ async function main() {
     };
 
     app.post("/trigger/post", triggerHandler);
+    app.get("/trigger/post", triggerHandler);
+    app.head("/trigger/post", (req, res) => {
+      if (!triggerAllowed(req)) return res.sendStatus(401);
+      return res.sendStatus(204);
+    });
     app.post("/trigger-post", triggerHandler);
+    app.get("/trigger-post", triggerHandler);
     app.post("/post-now", triggerHandler);
+    app.get("/post-now", triggerHandler);
 
     const port = Number(process.env.PORT || 3000);
     httpServer = app.listen(port, () => {

@@ -140,7 +140,20 @@ Render deployment:
 - Cron job for posting only: `npm run post:nodb`
 - Background worker for Slack RSVP buttons: `npm run start:nodb`
 
-The web service exposes `GET /health` and `POST /trigger/post`. A Render cron
-job exits after posting, so it cannot receive button clicks later. Keep the
-Socket Mode worker running if you want Google Sheet updates from Slack
-responses.
+The web service exposes `GET /health` and `POST /trigger/post`. Set
+`TRIGGER_SECRET` in Render, then call either:
+
+```text
+POST https://your-render-service.onrender.com/trigger/post
+Header: X-TRIGGER-SECRET: your-secret
+```
+
+or, for cron services that only support URL hits:
+
+```text
+GET https://your-render-service.onrender.com/trigger/post?secret=your-secret
+```
+
+A Render cron job exits after posting, so it cannot receive button clicks
+later. Keep the Socket Mode worker running if you want Google Sheet updates
+from Slack responses.
