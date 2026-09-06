@@ -72,8 +72,12 @@ Configure:
 ```powershell
 FWIP_CHANNEL_ID=C0BSB3XL77D
 BTEAM_CHANNEL_ID=your-b-team-channel-id
+ATEAM_CHANNEL_ID=your-a-team-channel-id
+CTEAM_CHANNEL_ID=your-c-team-channel-id
 FWIP_FILTER=fw/ip
 BTEAM_FILTER=b-team,b team,bteam
+ATEAM_FILTER=a-team,a team,ateam
+CTEAM_FILTER=c-team,c team,cteam
 CALENDAR_POST_CRON=0 9 * * *
 SPREADSHEET_DIR=data
 GOOGLE_SHEETS_SPREADSHEET_ID=your-google-sheet-id
@@ -136,9 +140,10 @@ to `BTEAM_CHANNEL_ID`.
 
 Render deployment:
 
-- Web service HTTP trigger: `node no_db_calendar.js --serve`
+- Web service HTTP trigger and Slack RSVP listener: `node no_db_calendar.js --serve`
 - Cron job for posting only: `npm run post:nodb`
-- Background worker for Slack RSVP buttons: `npm run start:nodb`
+- Optional background worker for Slack RSVP buttons when the web service is not
+  running with `--serve`: `npm run start:nodb`
 
 The web service exposes `GET /health` and `POST /trigger/post`. Set
 `TRIGGER_SECRET` in Render, then call either:
@@ -155,5 +160,6 @@ GET https://your-render-service.onrender.com/trigger/post?secret=your-secret
 ```
 
 A Render cron job exits after posting, so it cannot receive button clicks
-later. Keep the Socket Mode worker running if you want Google Sheet updates
-from Slack responses.
+later. Keep either the `--serve` process or the Socket Mode worker running if
+you want Google Sheet updates from Slack responses, but do not run both as
+listeners at the same time.

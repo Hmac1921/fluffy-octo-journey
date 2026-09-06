@@ -34,6 +34,18 @@ const ROUTES = [
     channel: process.env.BTEAM_CHANNEL_ID || "",
     filter: process.env.BTEAM_FILTER || "b-team,b team,bteam",
   },
+  {
+    key: "ateam",
+    label: "A-team",
+    channel: process.env.ATEAM_CHANNEL_ID || "",
+    filter: process.env.ATEAM_FILTER || "a-team,a team,ateam",
+  },
+  {
+    key: "cteam",
+    label: "C-team",
+    channel: process.env.CTEAM_CHANNEL_ID || "",
+    filter: process.env.CTEAM_FILTER || "c-team,c team,cteam",
+  },
 ].filter((route) => route.channel);
 
 function matchesRoute(event, route) {

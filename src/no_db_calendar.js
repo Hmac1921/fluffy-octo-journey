@@ -51,6 +51,18 @@ const ROUTES = [
     channel: process.env.BTEAM_CHANNEL_ID || "",
     filter: process.env.BTEAM_FILTER || "b-team,b team,bteam",
   },
+  {
+    key: "ateam",
+    label: "A-team",
+    channel: process.env.ATEAM_CHANNEL_ID || "",
+    filter: process.env.ATEAM_FILTER || "a-team,a team,ateam",
+  },
+  {
+    key: "cteam",
+    label: "C-team",
+    channel: process.env.CTEAM_CHANNEL_ID || "",
+    filter: process.env.CTEAM_FILTER || "c-team,c team,cteam",
+  },
 ].filter((route) => route.channel);
 
 function requireEnv(name) {
@@ -872,7 +884,6 @@ async function main() {
       console.log("Use POST /trigger/post to post today's due events");
     });
     keepAliveTimer = setInterval(() => {}, 60 * 60 * 1000);
-    return;
   }
 
   requireEnv("SLACK_APP_TOKEN");
@@ -933,6 +944,9 @@ async function main() {
 
   await slack.start();
   console.log("No-database calendar bot running in Socket Mode");
+  console.log(
+    `Attendance storage: ${googleSheetsEnabled() ? "Google Sheets" : "local CSV"}`,
+  );
   console.log(`Attendance CSV: ${ATTENDANCE_PATH}`);
 
   cron.schedule(
