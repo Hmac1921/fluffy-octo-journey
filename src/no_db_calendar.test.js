@@ -15,15 +15,25 @@ test("parseAvailabilityRows reads valid availability rows", () => {
 
   assert.deepEqual(rows, [
     {
+      created_at: "",
+      updated_at: "",
       slack_user_id: "U123",
+      name: "",
       weekday: "tuesday",
       reason: "work",
+      starts_on: "",
+      ends_on: "",
       active: true,
     },
     {
+      created_at: "",
+      updated_at: "",
       slack_user_id: "U456",
+      name: "",
       weekday: "wednesday",
       reason: "holiday",
+      starts_on: "",
+      ends_on: "",
       active: false,
     },
   ]);
@@ -50,6 +60,27 @@ test("isUserUnavailableForEvent matches weekday overrides case-insensitively", (
   );
   assert.equal(
     isUserUnavailableForEvent("U999", "2026-09-09T19:00:00Z", rows),
+    false,
+  );
+});
+
+test("isUserUnavailableForEvent respects term date ranges", () => {
+  const rows = [
+    {
+      slack_user_id: "U123",
+      weekday: "Thursday",
+      starts_on: "2026-09-01",
+      ends_on: "2026-12-20",
+      active: true,
+    },
+  ];
+
+  assert.equal(
+    isUserUnavailableForEvent("U123", "2026-09-10T17:00:00Z", rows),
+    true,
+  );
+  assert.equal(
+    isUserUnavailableForEvent("U123", "2027-01-07T17:00:00Z", rows),
     false,
   );
 });

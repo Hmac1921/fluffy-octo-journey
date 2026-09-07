@@ -82,6 +82,7 @@ CALENDAR_POST_CRON=0 9 * * *
 SPREADSHEET_DIR=data
 GOOGLE_SHEETS_SPREADSHEET_ID=your-google-sheet-id
 GOOGLE_SHEETS_SHEET_NAME=Attendance
+GOOGLE_AVAILABILITY_SHEET_NAME=Availability
 GOOGLE_SERVICE_ACCOUNT_EMAIL=your-service-account@project.iam.gserviceaccount.com
 GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
 ```
@@ -103,6 +104,12 @@ Google Sheets setup:
 Users can change their answer by pressing the other Slack button. The same row
 is updated with the new `status`, `updated_at`, Slack user id, and Slack display
 name.
+
+Users can also press `Availability` on a training post to save a recurring
+availability rule, for example unavailable every Thursday from a start date to
+the end of term. When Google Sheets credentials are configured, these rules are
+stored in the `Availability` tab. Without Google Sheets credentials they are
+stored in `data/availability.csv`.
 
 Dry-run today's routing without posting:
 
@@ -135,8 +142,15 @@ npm run start:nodb
 ```
 
 The scheduled bot checks at `09:00` Europe/Stockholm time by default. It posts
-FW/IP-matching events only to `FWIP_CHANNEL_ID` and B-team-matching events only
-to `BTEAM_CHANNEL_ID`.
+FW/IP, B-team, A-team, and C-team matching events only to their configured
+Slack channels.
+
+Limit a manual dry-run or post to one or more routes:
+
+```powershell
+node src/no_db_calendar.js --dry-run --days-ahead=1 --route=ateam,cteam
+node src/no_db_calendar.js --post-now --days-ahead=1 --route=ateam,cteam
+```
 
 Render deployment:
 
@@ -158,6 +172,30 @@ or, for cron services that only support URL hits:
 ```text
 GET https://your-render-service.onrender.com/trigger/post?secret=your-secret
 ```
+
+Attendance API:
+
+```text
+GET  https://your-render-service.onrender.com/api/attendance?secret=your-secret
+GET  https://your-render-service.onrender.com/api/attendance.csv?secret=your-secret
+POST https://your-render-service.onrender.com/api/attendance/sync?secret=your-secret
+GET  https://your-render-service.onrender.com/api/availability?secret=your-secret
+GET  https://your-render-service.onrender.com/api/availability.csv?secret=your-secret
+POST https://your-render-service.onrender.com/api/availability?secret=your-secret
+GET  https://your-render-service.onrender.com/api/events?from=2026-09-01&to=2026-12-20&secret=your-secret
+```
+
+The JSON and CSV endpoints can be used by Google Apps Script, Excel, or other
+sync tools. Optional filters are `group`, `status`, `event_uid`, `event_start`,
+`from`, `to`, and `source`. `source` can be `stored`, `csv`, or `sheet`.
+
+The sync endpoint pushes rows into Google Sheets using the service account
+credentials. By default it syncs from local `attendance.csv`; use
+`source=stored` or `source=sheet` only when that is intentional.
+
+The events endpoint expands the Klubraum iCal feed across a date range, so a
+whole term can be pulled into Sheets. Add `route=fwip,bteam,ateam,cteam` to
+limit which training groups are returned.
 
 A Render cron job exits after posting, so it cannot receive button clicks
 later. Keep either the `--serve` process or the Socket Mode worker running if

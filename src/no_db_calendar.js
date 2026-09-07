@@ -32,11 +32,31 @@ const ATTENDANCE_HEADERS = [
   "channel_id",
   "message_ts",
 ];
-const AVAILABILITY_HEADERS = ["slack_user_id", "weekday", "reason", "active"];
+const AVAILABILITY_HEADERS = [
+  "created_at",
+  "updated_at",
+  "slack_user_id",
+  "name",
+  "weekday",
+  "reason",
+  "starts_on",
+  "ends_on",
+  "active",
+];
 const GOOGLE_SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
 let googleAccessToken = null;
 let httpServer = null;
 let keepAliveTimer = null;
+const WEEKDAY_OPTIONS = [
+  { key: "monday", label: "Monday" },
+  { key: "tuesday", label: "Tuesday" },
+  { key: "wednesday", label: "Wednesday" },
+  { key: "thursday", label: "Thursday" },
+  { key: "friday", label: "Friday" },
+  { key: "saturday", label: "Saturday" },
+  { key: "sunday", label: "Sunday" },
+];
+const DEFAULT_TERM_DAYS = Number(process.env.DEFAULT_TERM_DAYS || 120);
 
 const ROUTES = [
   {
@@ -103,6 +123,13 @@ function targetDayFromArgs() {
   return DateTime.now().setZone(TZ);
 }
 
+function routeKeysFromArgs() {
+  return argValue("route")
+    .split(",")
+    .map((route) => route.trim().toLowerCase())
+    .filter(Boolean);
+}
+
 function csvEscape(value) {
   const str = String(value ?? "");
   if (!/[",\r\n]/.test(str)) return str;
@@ -144,6 +171,10 @@ function googleSheetsEnabled() {
 
 function googleSheetName() {
   return process.env.GOOGLE_SHEETS_SHEET_NAME || "Attendance";
+}
+
+function googleAvailabilitySheetName() {
+  return process.env.GOOGLE_AVAILABILITY_SHEET_NAME || "Availability";
 }
 
 function googleCredentials() {
@@ -247,27 +278,33 @@ async function googleFetch(pathname, options = {}) {
   return json;
 }
 
-function sheetRange(range) {
-  return `'${googleSheetName().replace(/'/g, "''")}'!${range}`;
+function sheetRange(range, sheetName = googleSheetName()) {
+  return `'${sheetName.replace(/'/g, "''")}'!${range}`;
 }
 
-async function ensureGoogleSheet() {
+async function ensureGoogleSheet(
+  sheetName = googleSheetName(),
+  headers = ATTENDANCE_HEADERS,
+) {
   const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
   const spreadsheet = await googleFetch(`/spreadsheets/${spreadsheetId}`);
   const sheetExists = spreadsheet.sheets?.some(
-    (sheet) => sheet.properties?.title === googleSheetName(),
+    (sheet) => sheet.properties?.title === sheetName,
   );
 
   if (!sheetExists) {
     await googleFetch(`/spreadsheets/${spreadsheetId}:batchUpdate`, {
       method: "POST",
       body: JSON.stringify({
-        requests: [{ addSheet: { properties: { title: googleSheetName() } } }],
+        requests: [{ addSheet: { properties: { title: sheetName } } }],
       }),
     });
   }
 
-  const headerRange = encodeURIComponent(sheetRange("A1:K1"));
+  const lastColumn = columnName(headers.length);
+  const headerRange = encodeURIComponent(
+    sheetRange(`A1:${lastColumn}1`, sheetName),
+  );
   const values = await googleFetch(
     `/spreadsheets/${spreadsheetId}/values/${headerRange}`,
   );
@@ -277,14 +314,25 @@ async function ensureGoogleSheet() {
       `/spreadsheets/${spreadsheetId}/values/${headerRange}?valueInputOption=RAW`,
       {
         method: "PUT",
-        body: JSON.stringify({ values: [ATTENDANCE_HEADERS] }),
+        body: JSON.stringify({ values: [headers] }),
       },
     );
   }
 }
 
-function sheetRowsFromValues(values) {
-  const headers = values[0] || ATTENDANCE_HEADERS;
+function columnName(index) {
+  let value = index;
+  let name = "";
+  while (value > 0) {
+    const remainder = (value - 1) % 26;
+    name = String.fromCharCode(65 + remainder) + name;
+    value = Math.floor((value - 1) / 26);
+  }
+  return name;
+}
+
+function sheetRowsFromValues(values, defaultHeaders = ATTENDANCE_HEADERS) {
+  const headers = values[0] || defaultHeaders;
   return values.slice(1).map((cells) => {
     const row = Object.fromEntries(
       headers.map((header, index) => [header, cells[index] || ""]),
@@ -299,6 +347,10 @@ function sheetRowValues(row) {
   return ATTENDANCE_HEADERS.map((header) => row[header] || "");
 }
 
+function availabilitySheetRowValues(row) {
+  return AVAILABILITY_HEADERS.map((header) => row[header] || "");
+}
+
 async function readSheetAttendance() {
   const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
   await ensureGoogleSheet();
@@ -307,6 +359,21 @@ async function readSheetAttendance() {
     `/spreadsheets/${spreadsheetId}/values/${range}`,
   );
   return sheetRowsFromValues(values.values || [ATTENDANCE_HEADERS]);
+}
+
+async function readSheetAvailability() {
+  const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
+  await ensureGoogleSheet(googleAvailabilitySheetName(), AVAILABILITY_HEADERS);
+  const lastColumn = columnName(AVAILABILITY_HEADERS.length);
+  const range = encodeURIComponent(
+    sheetRange(`A:${lastColumn}`, googleAvailabilitySheetName()),
+  );
+  const values = await googleFetch(
+    `/spreadsheets/${spreadsheetId}/values/${range}`,
+  );
+  return sheetRowsFromValues(values.values || [AVAILABILITY_HEADERS], AVAILABILITY_HEADERS)
+    .map((row) => normalizeAvailabilityRow(row))
+    .filter((row) => row.slack_user_id && row.weekday);
 }
 
 async function upsertSheetAttendance(entry) {
@@ -364,6 +431,66 @@ async function upsertSheetAttendance(entry) {
   return { action: "created" };
 }
 
+async function upsertSheetAvailability(entry) {
+  const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
+  await ensureGoogleSheet(googleAvailabilitySheetName(), AVAILABILITY_HEADERS);
+
+  const lastColumn = columnName(AVAILABILITY_HEADERS.length);
+  const range = encodeURIComponent(
+    sheetRange(`A:${lastColumn}`, googleAvailabilitySheetName()),
+  );
+  const values = await googleFetch(
+    `/spreadsheets/${spreadsheetId}/values/${range}`,
+  );
+  const rows = sheetRowsFromValues(values.values || [AVAILABILITY_HEADERS], AVAILABILITY_HEADERS)
+    .map((row) => normalizeAvailabilityRow(row))
+    .filter((row) => row.slack_user_id && row.weekday);
+  const weekday = normalizeWeekdayKey(entry.weekday);
+  const existingIndex = rows.findIndex(
+    (row) =>
+      row.slack_user_id === entry.slack_user_id && row.weekday === weekday,
+  );
+  const now = new Date().toISOString();
+  const nextRow = {
+    created_at: rows[existingIndex]?.created_at || now,
+    updated_at: now,
+    slack_user_id: entry.slack_user_id,
+    name: entry.name || rows[existingIndex]?.name || "",
+    weekday,
+    reason: entry.reason || "",
+    starts_on: entry.starts_on || "",
+    ends_on: entry.ends_on || "",
+    active: entry.active ? "true" : "false",
+  };
+
+  if (existingIndex >= 0) {
+    const sheetRowNumber = existingIndex + 2;
+    const updateRange = encodeURIComponent(
+      sheetRange(
+        `A${sheetRowNumber}:${lastColumn}${sheetRowNumber}`,
+        googleAvailabilitySheetName(),
+      ),
+    );
+    await googleFetch(
+      `/spreadsheets/${spreadsheetId}/values/${updateRange}?valueInputOption=USER_ENTERED`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ values: [availabilitySheetRowValues(nextRow)] }),
+      },
+    );
+    return nextRow;
+  }
+
+  await googleFetch(
+    `/spreadsheets/${spreadsheetId}/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+    {
+      method: "POST",
+      body: JSON.stringify({ values: [availabilitySheetRowValues(nextRow)] }),
+    },
+  );
+  return nextRow;
+}
+
 function normalizeWeekdayKey(value) {
   const key = String(value || "")
     .trim()
@@ -390,6 +517,38 @@ function normalizeWeekdayKey(value) {
   return map[key] || key;
 }
 
+function weekdayLabel(value) {
+  const key = normalizeWeekdayKey(value);
+  return WEEKDAY_OPTIONS.find((item) => item.key === key)?.label || value;
+}
+
+function weekdayKeyFromDate(date) {
+  return WEEKDAY_OPTIONS[date.weekday - 1]?.key || "";
+}
+
+function normalizeAvailabilityRow(row = {}) {
+  const activeValue = String(row.active ?? "")
+    .trim()
+    .toLowerCase();
+  return {
+    created_at: row.created_at || row.timestamp || "",
+    updated_at: row.updated_at || row.timestamp || "",
+    slack_user_id: String(row.slack_user_id || "").trim(),
+    name: String(row.name || "").trim(),
+    weekday: normalizeWeekdayKey(row.weekday),
+    reason: String(row.reason || "").trim(),
+    starts_on: String(row.starts_on || "").trim(),
+    ends_on: String(row.ends_on || "").trim(),
+    active:
+      row.active === true ||
+      activeValue === "yes" ||
+      activeValue === "true" ||
+      activeValue === "1" ||
+      activeValue === "y" ||
+      activeValue === "on",
+  };
+}
+
 function parseAvailabilityRows(text) {
   const source = String(text || "").trim();
   if (!source) return [];
@@ -408,20 +567,7 @@ function parseAvailabilityRows(text) {
         headers.map((header, index) => [header, values[index] || ""]),
       );
 
-      const activeValue = String(row.active ?? "")
-        .trim()
-        .toLowerCase();
-      return {
-        slack_user_id: String(row.slack_user_id || "").trim(),
-        weekday: String(row.weekday || "").trim(),
-        reason: String(row.reason || "").trim(),
-        active:
-          activeValue === "yes" ||
-          activeValue === "true" ||
-          activeValue === "1" ||
-          activeValue === "y" ||
-          activeValue === "on",
-      };
+      return normalizeAvailabilityRow(row);
     })
     .filter((row) => row.slack_user_id && row.weekday);
 }
@@ -429,14 +575,18 @@ function parseAvailabilityRows(text) {
 function isUserUnavailableForEvent(slackUserId, eventStartIso, rows = []) {
   if (!slackUserId || !eventStartIso) return false;
 
-  const eventWeekday = DateTime.fromISO(eventStartIso, { zone: "utc" })
-    .setZone(TZ)
-    .weekdayLong.toLowerCase();
+  const eventDate = DateTime.fromISO(eventStartIso, { zone: "utc" }).setZone(
+    TZ,
+  );
+  const eventWeekday = weekdayKeyFromDate(eventDate);
+  const eventDay = eventDate.toISODate();
 
   return rows.some((row) => {
     if (String(row.slack_user_id).trim() !== String(slackUserId).trim())
       return false;
     if (!row.active) return false;
+    if (row.starts_on && eventDay < row.starts_on) return false;
+    if (row.ends_on && eventDay > row.ends_on) return false;
     return (
       normalizeWeekdayKey(row.weekday) === normalizeWeekdayKey(eventWeekday)
     );
@@ -470,11 +620,18 @@ async function ensureDataFiles() {
   }
 }
 
-async function readAvailabilityRules() {
+async function readCsvAvailabilityRules() {
   await ensureDataFiles();
   const availabilityPath = path.join(DATA_DIR, "availability.csv");
   const text = await fs.readFile(availabilityPath, "utf8");
   return parseAvailabilityRows(text);
+}
+
+async function readAvailabilityRules() {
+  if (googleSheetsEnabled()) {
+    return readSheetAvailability();
+  }
+  return readCsvAvailabilityRules();
 }
 
 async function writeAvailabilityRules(rows) {
@@ -489,6 +646,74 @@ async function writeAvailabilityRules(rows) {
     ),
   ];
   await fs.writeFile(availabilityPath, `${lines.join("\n")}\n`, "utf8");
+}
+
+async function upsertAvailabilityRule(entry) {
+  if (googleSheetsEnabled()) {
+    return upsertSheetAvailability(entry);
+  }
+
+  const rows = await readCsvAvailabilityRules();
+  const weekday = normalizeWeekdayKey(entry.weekday);
+  const existing = rows.find(
+    (row) =>
+      row.slack_user_id === entry.slack_user_id && row.weekday === weekday,
+  );
+  const now = new Date().toISOString();
+  const updated = {
+    created_at: existing?.created_at || now,
+    updated_at: now,
+    slack_user_id: entry.slack_user_id,
+    name: entry.name || existing?.name || "",
+    weekday,
+    reason: entry.reason || "",
+    starts_on: entry.starts_on || "",
+    ends_on: entry.ends_on || "",
+    active: entry.active ? "true" : "false",
+  };
+
+  if (existing) {
+    Object.assign(existing, updated);
+  } else {
+    rows.push(updated);
+  }
+
+  await writeAvailabilityRules(rows);
+  return updated;
+}
+
+function filterAvailabilityRows(rows, query = {}) {
+  return rows.filter((row) => {
+    if (query.slack_user_id && row.slack_user_id !== query.slack_user_id) {
+      return false;
+    }
+    if (query.weekday && row.weekday !== normalizeWeekdayKey(query.weekday)) {
+      return false;
+    }
+    if (query.active !== undefined) {
+      const expected = String(query.active).toLowerCase();
+      const isActive = Boolean(row.active === true || row.active === "true");
+      if (
+        (expected === "true" || expected === "1" || expected === "yes") !==
+        isActive
+      ) {
+        return false;
+      }
+    }
+    return true;
+  });
+}
+
+function availabilityRowsToCsv(rows) {
+  const lines = [
+    AVAILABILITY_HEADERS.join(","),
+    ...rows.map((row) =>
+      AVAILABILITY_HEADERS.map((header) => csvEscape(row[header] ?? "")).join(
+        ",",
+      ),
+    ),
+  ];
+  return `${lines.join("\n")}\n`;
 }
 
 async function readAttendance() {
@@ -558,6 +783,52 @@ async function readStoredAttendance() {
   return readAttendance();
 }
 
+function filterAttendanceRows(rows, query = {}) {
+  return rows.filter((row) => {
+    if (query.group && row.group !== query.group) return false;
+    if (query.status && row.status !== query.status) return false;
+    if (query.event_uid && row.event_uid !== query.event_uid) return false;
+    if (query.event_start && row.event_start !== query.event_start) {
+      return false;
+    }
+    if (query.from && row.event_start < query.from) return false;
+    if (query.to && row.event_start > query.to) return false;
+    return true;
+  });
+}
+
+function attendanceRowsToCsv(rows) {
+  const lines = [
+    ATTENDANCE_HEADERS.join(","),
+    ...rows.map((row) =>
+      ATTENDANCE_HEADERS.map((header) => csvEscape(row[header] ?? "")).join(
+        ",",
+      ),
+    ),
+  ];
+  return `${lines.join("\n")}\n`;
+}
+
+async function readAttendanceSource(source = "stored") {
+  if (source === "csv") return readAttendance();
+  if (source === "sheet") return readSheetAttendance();
+  return readStoredAttendance();
+}
+
+async function syncAttendanceRowsToSheet(rows) {
+  if (!googleSheetsEnabled()) {
+    throw new Error(
+      "Google Sheets sync is not configured. Set GOOGLE_SHEETS_SPREADSHEET_ID and service account credentials.",
+    );
+  }
+
+  const results = [];
+  for (const row of rows) {
+    results.push(await upsertSheetAttendance(row));
+  }
+  return results;
+}
+
 async function upsertAttendance(entry) {
   if (googleSheetsEnabled()) {
     return upsertSheetAttendance(entry);
@@ -571,9 +842,35 @@ async function attendanceSummary(eventUid, eventStart) {
   const matching = rows.filter(
     (row) => row.event_uid === eventUid && row.event_start === eventStart,
   );
+  const availabilityRules = await readAvailabilityRules();
+  const unavailable = availabilityRules
+    .filter((row) =>
+      isUserUnavailableForEvent(row.slack_user_id, eventStart, [row]),
+    )
+    .map((row) => ({
+      slack_user_id: row.slack_user_id,
+      name: row.name || row.slack_user_id,
+      status: "no",
+    }));
+  const unavailableIds = new Set(
+    unavailable.map((row) => String(row.slack_user_id)),
+  );
+  const noRows = [
+    ...matching.filter((row) => row.status === "no"),
+    ...unavailable.filter(
+      (row) =>
+        !matching.some(
+          (match) =>
+            match.status === "no" &&
+            String(match.slack_user_id) === String(row.slack_user_id),
+        ),
+    ),
+  ];
   return {
-    yes: matching.filter((row) => row.status === "yes"),
-    no: matching.filter((row) => row.status === "no"),
+    yes: matching.filter(
+      (row) => row.status === "yes" && !unavailableIds.has(row.slack_user_id),
+    ),
+    no: noRows,
   };
 }
 
@@ -669,6 +966,49 @@ function dueOnDay(events, route, day) {
   });
 }
 
+function routesFromKeys(routeKeys = []) {
+  return routeKeys.length
+    ? ROUTES.filter((route) => routeKeys.includes(route.key))
+    : ROUTES;
+}
+
+function expandedEventsInRange(events, fromDay, toDay, routeKeys = []) {
+  const routes = routesFromKeys(routeKeys);
+  const results = [];
+  let cursor = fromDay.startOf("day");
+  const end = toDay.startOf("day");
+
+  while (cursor <= end) {
+    for (const route of routes) {
+      for (const event of dueOnDay(events, route, cursor)) {
+        results.push({
+          route: route.key,
+          group: route.label,
+          channel: route.channel,
+          event_uid: event.uid,
+          event_title: event.title,
+          event_start: event.start,
+          event_end: event.end,
+          event_location: event.location || "",
+          when: formatWhen(event.start),
+        });
+      }
+    }
+    cursor = cursor.plus({ days: 1 });
+  }
+
+  return results.sort(
+    (a, b) => new Date(a.event_start) - new Date(b.event_start),
+  );
+}
+
+function dateQuery(value, fallback) {
+  if (!value) return fallback;
+  const parsed = DateTime.fromISO(String(value), { zone: TZ });
+  if (!parsed.isValid) throw new Error(`Invalid date: ${value}`);
+  return parsed;
+}
+
 function formatWhen(iso) {
   return DateTime.fromISO(iso, { zone: "utc" })
     .setZone(TZ)
@@ -688,17 +1028,169 @@ function escapeMrkdwn(value) {
     .replace(/>/g, "&gt;");
 }
 
-async function buildBlocks(event, route) {
-  const summary = await attendanceSummary(event.uid, event.start);
-  const location = event.location ? `\n*Where:* ${event.location}` : "";
-  const text = `*${event.title}*\n*When:* ${formatWhen(event.start)}${location}\n*Group:* ${route.label}`;
-  const basePayload = {
+function responsePayload(event, route, status, source = {}) {
+  return JSON.stringify({
     event_uid: event.uid,
     event_title: event.title,
     event_start: event.start,
     event_location: event.location || "",
     group: route.key,
+    status,
+    channel_id: source.channel_id || "",
+    message_ts: source.message_ts || "",
+  });
+}
+
+function changePayload(event, route, source = {}) {
+  return JSON.stringify({
+    event_uid: event.uid,
+    event_title: event.title,
+    event_start: event.start,
+    event_location: event.location || "",
+    group: route.key,
+    channel_id: source.channel_id || "",
+    message_ts: source.message_ts || "",
+  });
+}
+
+function responseButtons(event, route, source = {}) {
+  return [
+    {
+      type: "button",
+      text: { type: "plain_text", text: "Yes" },
+      style: "primary",
+      action_id: "sheet_attendance_yes",
+      value: responsePayload(event, route, "yes", source),
+    },
+    {
+      type: "button",
+      text: { type: "plain_text", text: "No" },
+      style: "danger",
+      action_id: "sheet_attendance_no",
+      value: responsePayload(event, route, "no", source),
+    },
+  ];
+}
+
+function sourceFromBody(body, payload = {}) {
+  return {
+    channel_id: payload.channel_id || body.channel?.id || "",
+    message_ts: payload.message_ts || body.message?.ts || "",
   };
+}
+
+function eventFromPayload(payload) {
+  return {
+    uid: payload.event_uid,
+    title: payload.event_title,
+    start: payload.event_start,
+    location: payload.event_location || "",
+  };
+}
+
+function localDateFromIso(iso) {
+  return DateTime.fromISO(iso, { zone: "utc" }).setZone(TZ).toISODate();
+}
+
+function defaultTermEndDate(startDate) {
+  const configured = process.env.TERM_END_DATE;
+  if (configured) return configured;
+  return DateTime.fromISO(startDate, { zone: TZ })
+    .plus({ days: DEFAULT_TERM_DAYS })
+    .toISODate();
+}
+
+function plainOption(text, value) {
+  return {
+    text: { type: "plain_text", text },
+    value,
+  };
+}
+
+function availabilityModal(event, route, source) {
+  const eventDate = localDateFromIso(event.start);
+  const eventWeekday = weekdayKeyFromDate(
+    DateTime.fromISO(event.start, { zone: "utc" }).setZone(TZ),
+  );
+  const weekdayOptions = WEEKDAY_OPTIONS.map((item) =>
+    plainOption(item.label, item.key),
+  );
+  const selectedWeekday =
+    weekdayOptions.find((item) => item.value === eventWeekday) ||
+    weekdayOptions[0];
+
+  return {
+    type: "modal",
+    callback_id: "availability_submit",
+    private_metadata: changePayload(event, route, source),
+    title: { type: "plain_text", text: "Availability" },
+    submit: { type: "plain_text", text: "Save" },
+    close: { type: "plain_text", text: "Cancel" },
+    blocks: [
+      {
+        type: "input",
+        block_id: "availability_status",
+        label: { type: "plain_text", text: "Status" },
+        element: {
+          type: "static_select",
+          action_id: "value",
+          initial_option: plainOption("Unavailable every week", "unavailable"),
+          options: [
+            plainOption("Unavailable every week", "unavailable"),
+            plainOption("Available again", "available"),
+          ],
+        },
+      },
+      {
+        type: "input",
+        block_id: "availability_weekday",
+        label: { type: "plain_text", text: "Day" },
+        element: {
+          type: "static_select",
+          action_id: "value",
+          initial_option: selectedWeekday,
+          options: weekdayOptions,
+        },
+      },
+      {
+        type: "input",
+        block_id: "availability_starts_on",
+        label: { type: "plain_text", text: "From" },
+        element: {
+          type: "datepicker",
+          action_id: "value",
+          initial_date: eventDate,
+        },
+      },
+      {
+        type: "input",
+        block_id: "availability_ends_on",
+        label: { type: "plain_text", text: "Until" },
+        element: {
+          type: "datepicker",
+          action_id: "value",
+          initial_date: defaultTermEndDate(eventDate),
+        },
+      },
+      {
+        type: "input",
+        block_id: "availability_reason",
+        optional: true,
+        label: { type: "plain_text", text: "Reason" },
+        element: {
+          type: "plain_text_input",
+          action_id: "value",
+          placeholder: { type: "plain_text", text: "Optional" },
+        },
+      },
+    ],
+  };
+}
+
+async function buildBlocks(event, route) {
+  const summary = await attendanceSummary(event.uid, event.start);
+  const location = event.location ? `\n*Where:* ${event.location}` : "";
+  const text = `*${event.title}*\n*When:* ${formatWhen(event.start)}${location}\n*Group:* ${route.label}`;
 
   return {
     text: `${event.title} - ${formatWhen(event.start)}`,
@@ -707,19 +1199,12 @@ async function buildBlocks(event, route) {
       {
         type: "actions",
         elements: [
+          ...responseButtons(event, route),
           {
             type: "button",
-            text: { type: "plain_text", text: "Yes" },
-            style: "primary",
-            action_id: "sheet_attendance_yes",
-            value: JSON.stringify({ ...basePayload, status: "yes" }),
-          },
-          {
-            type: "button",
-            text: { type: "plain_text", text: "No" },
-            style: "danger",
-            action_id: "sheet_attendance_no",
-            value: JSON.stringify({ ...basePayload, status: "no" }),
+            text: { type: "plain_text", text: "Availability" },
+            action_id: "availability_open",
+            value: changePayload(event, route),
           },
         ],
       },
@@ -734,6 +1219,62 @@ async function buildBlocks(event, route) {
       },
     ],
   };
+}
+
+function changeResponseBlocks(event, route, source) {
+  return [
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `Change your response for *${escapeMrkdwn(event.title)}*`,
+      },
+    },
+    {
+      type: "actions",
+      elements: responseButtons(event, route, source),
+    },
+  ];
+}
+
+function savedResponseBlocks(event, route, source, status) {
+  const responseText = status === "yes" ? "Yes" : "No";
+  return [
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `Your response has been saved as *${responseText}* for *${escapeMrkdwn(event.title)}*.`,
+      },
+    },
+    {
+      type: "actions",
+      elements: [
+        {
+          type: "button",
+          text: { type: "plain_text", text: "Change your response" },
+          action_id: "sheet_attendance_change",
+          value: changePayload(event, route, source),
+        },
+      ],
+    },
+  ];
+}
+
+function viewStateValue(view, blockId, actionId = "value") {
+  return view.state?.values?.[blockId]?.[actionId];
+}
+
+function selectedViewValue(view, blockId) {
+  return viewStateValue(view, blockId)?.selected_option?.value || "";
+}
+
+function dateViewValue(view, blockId) {
+  return viewStateValue(view, blockId)?.selected_date || "";
+}
+
+function textViewValue(view, blockId) {
+  return viewStateValue(view, blockId)?.value || "";
 }
 
 async function slackName(client, userId, fallback) {
@@ -759,9 +1300,13 @@ async function postDueEvents(
 ) {
   const events = await fetchKlubraumEvents();
   const posts = await readPosts();
+  const selectedRouteKeys = routeKeysFromArgs();
+  const routes = selectedRouteKeys.length
+    ? ROUTES.filter((route) => selectedRouteKeys.includes(route.key))
+    : ROUTES;
   const results = [];
 
-  for (const route of ROUTES) {
+  for (const route of routes) {
     const dueEvents = dueOnDay(events, route, targetDay);
     for (const event of dueEvents) {
       const postKey = `${route.key}:${route.channel}:${event.uid}:${event.start}`;
@@ -834,6 +1379,7 @@ async function main() {
     process.env.POST_TRIGGER_ENABLED === "1"
   ) {
     const app = express();
+    app.use(express.json());
     const infoHandler = (_req, res) => {
       res.json({
         ok: true,
@@ -841,6 +1387,12 @@ async function main() {
         endpoints: {
           health: "GET /health",
           post: "GET or POST /trigger/post?secret=...",
+          attendance: "GET /api/attendance?secret=...",
+          attendanceCsv: "GET /api/attendance.csv?secret=...",
+          attendanceSync: "POST /api/attendance/sync?secret=...",
+          availability: "GET or POST /api/availability?secret=...",
+          availabilityCsv: "GET /api/availability.csv?secret=...",
+          events: "GET /api/events?from=YYYY-MM-DD&to=YYYY-MM-DD&secret=...",
         },
       });
     };
@@ -878,6 +1430,151 @@ async function main() {
     app.post("/post-now", triggerHandler);
     app.get("/post-now", triggerHandler);
 
+    const attendanceApiHandler = async (req, res) => {
+      try {
+        if (!triggerAllowed(req)) return res.sendStatus(401);
+        const rows = filterAttendanceRows(
+          await readAttendanceSource(String(req.query.source || "stored")),
+          req.query,
+        );
+        res.json({
+          ok: true,
+          source: req.query.source || "stored",
+          count: rows.length,
+          rows,
+        });
+      } catch (err) {
+        console.error("Attendance API failed", err);
+        res.status(500).json({ error: err.message || String(err) });
+      }
+    };
+
+    app.get("/api/attendance", attendanceApiHandler);
+
+    app.get("/api/attendance.csv", async (req, res) => {
+      try {
+        if (!triggerAllowed(req)) return res.sendStatus(401);
+        const rows = filterAttendanceRows(
+          await readAttendanceSource(String(req.query.source || "stored")),
+          req.query,
+        );
+        res
+          .type("text/csv")
+          .send(attendanceRowsToCsv(rows));
+      } catch (err) {
+        console.error("Attendance CSV API failed", err);
+        res.status(500).json({ error: err.message || String(err) });
+      }
+    });
+
+    app.post("/api/attendance/sync", async (req, res) => {
+      try {
+        if (!triggerAllowed(req)) return res.sendStatus(401);
+        const source = String(req.query.source || "csv");
+        const rows = filterAttendanceRows(
+          await readAttendanceSource(source),
+          req.query,
+        );
+        const results = await syncAttendanceRowsToSheet(rows);
+        res.json({
+          ok: true,
+          source,
+          count: rows.length,
+          created: results.filter((item) => item.action === "created").length,
+          updated: results.filter((item) => item.action === "updated").length,
+        });
+      } catch (err) {
+        console.error("Attendance sync failed", err);
+        res.status(500).json({ error: err.message || String(err) });
+      }
+    });
+
+    app.get("/api/availability", async (req, res) => {
+      try {
+        if (!triggerAllowed(req)) return res.sendStatus(401);
+        const rows = filterAvailabilityRows(
+          await readAvailabilityRules(),
+          req.query,
+        );
+        res.json({ ok: true, count: rows.length, rows });
+      } catch (err) {
+        console.error("Availability API failed", err);
+        res.status(500).json({ error: err.message || String(err) });
+      }
+    });
+
+    app.get("/api/availability.csv", async (req, res) => {
+      try {
+        if (!triggerAllowed(req)) return res.sendStatus(401);
+        const rows = filterAvailabilityRows(
+          await readAvailabilityRules(),
+          req.query,
+        );
+        res
+          .type("text/csv")
+          .send(availabilityRowsToCsv(rows));
+      } catch (err) {
+        console.error("Availability CSV API failed", err);
+        res.status(500).json({ error: err.message || String(err) });
+      }
+    });
+
+    app.post("/api/availability", async (req, res) => {
+      try {
+        if (!triggerAllowed(req)) return res.sendStatus(401);
+        if (!req.body?.slack_user_id || !req.body?.weekday) {
+          return res.status(400).json({
+            error: "slack_user_id and weekday are required",
+          });
+        }
+        const row = await upsertAvailabilityRule({
+          slack_user_id: String(req.body.slack_user_id),
+          name: String(req.body.name || ""),
+          weekday: String(req.body.weekday),
+          reason: String(req.body.reason || ""),
+          starts_on: String(req.body.starts_on || ""),
+          ends_on: String(req.body.ends_on || ""),
+          active: req.body.active !== false && req.body.active !== "false",
+        });
+        res.json({ ok: true, row });
+      } catch (err) {
+        console.error("Availability write failed", err);
+        res.status(500).json({ error: err.message || String(err) });
+      }
+    });
+
+    app.get("/api/events", async (req, res) => {
+      try {
+        if (!triggerAllowed(req)) return res.sendStatus(401);
+        const today = DateTime.now().setZone(TZ);
+        const from = dateQuery(req.query.from, today);
+        const to = dateQuery(
+          req.query.to,
+          today.plus({ days: DEFAULT_TERM_DAYS }),
+        );
+        const routeKeys = String(req.query.route || "")
+          .split(",")
+          .map((route) => route.trim().toLowerCase())
+          .filter(Boolean);
+        const rows = expandedEventsInRange(
+          await fetchKlubraumEvents(),
+          from,
+          to,
+          routeKeys,
+        );
+        res.json({
+          ok: true,
+          from: from.toISODate(),
+          to: to.toISODate(),
+          count: rows.length,
+          rows,
+        });
+      } catch (err) {
+        console.error("Events API failed", err);
+        res.status(500).json({ error: err.message || String(err) });
+      }
+    });
+
     const port = Number(process.env.PORT || 3000);
     httpServer = app.listen(port, () => {
       console.log(`HTTP trigger server listening on :${port}`);
@@ -893,12 +1590,105 @@ async function main() {
     socketMode: true,
   });
 
+  slack.action("availability_open", async ({ ack, body, client }) => {
+    await ack();
+    const action = body.actions?.[0];
+    const payload = JSON.parse(action?.value || "{}");
+    const route = ROUTES.find((item) => item.key === payload.group);
+    if (!payload.event_uid || !route || !body.trigger_id) return;
+
+    await client.views.open({
+      trigger_id: body.trigger_id,
+      view: availabilityModal(
+        eventFromPayload(payload),
+        route,
+        sourceFromBody(body, payload),
+      ),
+    });
+  });
+
+  slack.view("availability_submit", async ({ ack, body, view, client }) => {
+    const payload = JSON.parse(view.private_metadata || "{}");
+    const route = ROUTES.find((item) => item.key === payload.group);
+    const userId = body.user?.id;
+    const status = selectedViewValue(view, "availability_status");
+    const weekday = selectedViewValue(view, "availability_weekday");
+    const startsOn = dateViewValue(view, "availability_starts_on");
+    const endsOn = dateViewValue(view, "availability_ends_on");
+    const reason = textViewValue(view, "availability_reason");
+
+    if (startsOn && endsOn && endsOn < startsOn) {
+      await ack({
+        response_action: "errors",
+        errors: {
+          availability_ends_on: "End date must be after the start date.",
+        },
+      });
+      return;
+    }
+
+    await ack();
+    if (!userId || !route || !weekday) return;
+
+    const event = eventFromPayload(payload);
+    const source = sourceFromBody({}, payload);
+    const name = await slackName(client, userId, body.user?.name);
+    const active = status !== "available";
+    const row = await upsertAvailabilityRule({
+      slack_user_id: userId,
+      name,
+      weekday,
+      reason,
+      starts_on: startsOn,
+      ends_on: endsOn,
+      active,
+    });
+
+    if (source.channel_id && source.message_ts) {
+      const message = await buildBlocks(event, route);
+      await client.chat.update({
+        channel: source.channel_id,
+        ts: source.message_ts,
+        text: message.text,
+        blocks: message.blocks,
+      });
+    }
+
+    if (source.channel_id) {
+      const savedText = active
+        ? `Saved: unavailable every ${weekdayLabel(row.weekday)} from ${row.starts_on || "now"} to ${row.ends_on || "open ended"}.`
+        : `Cleared: available again on ${weekdayLabel(row.weekday)}.`;
+      await client.chat.postEphemeral({
+        channel: source.channel_id,
+        user: userId,
+        text: savedText,
+      });
+    }
+  });
+
   slack.action(/^sheet_attendance_/, async ({ ack, body, client }) => {
     await ack();
     const action = body.actions?.[0];
     const payload = JSON.parse(action?.value || "{}");
     const userId = body.user?.id;
-    if (!payload.event_uid || !payload.status || !userId) return;
+    const route = ROUTES.find((item) => item.key === payload.group);
+    if (!payload.event_uid || !route || !userId) return;
+
+    const source = sourceFromBody(body, payload);
+    const event = eventFromPayload(payload);
+
+    if (action?.action_id === "sheet_attendance_change") {
+      if (!source.channel_id) return;
+      await client.chat.postEphemeral({
+        channel: source.channel_id,
+        user: userId,
+        text: `Change your response for ${payload.event_title}`,
+        blocks: changeResponseBlocks(event, route, source),
+      });
+      return;
+    }
+
+    if (!payload.status) return;
 
     const availabilityRules = await readAvailabilityRules();
     const forcedStatus = isUserUnavailableForEvent(
@@ -918,26 +1708,26 @@ async function main() {
       status: forcedStatus,
       slack_user_id: userId,
       name,
-      channel_id: body.channel?.id || "",
-      message_ts: body.message?.ts || "",
+      channel_id: source.channel_id,
+      message_ts: source.message_ts,
     });
 
-    const route = ROUTES.find((item) => item.key === payload.group);
-    if (route && body.channel?.id && body.message?.ts) {
-      const message = await buildBlocks(
-        {
-          uid: payload.event_uid,
-          title: payload.event_title,
-          start: payload.event_start,
-          location: payload.event_location || "",
-        },
-        route,
-      );
+    if (source.channel_id && source.message_ts) {
+      const message = await buildBlocks(event, route);
       await client.chat.update({
-        channel: body.channel.id,
-        ts: body.message.ts,
+        channel: source.channel_id,
+        ts: source.message_ts,
         text: message.text,
         blocks: message.blocks,
+      });
+    }
+
+    if (source.channel_id) {
+      await client.chat.postEphemeral({
+        channel: source.channel_id,
+        user: userId,
+        text: `Your response has been saved as ${forcedStatus}`,
+        blocks: savedResponseBlocks(event, route, source, forcedStatus),
       });
     }
   });
