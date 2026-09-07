@@ -1088,6 +1088,19 @@ function eventFromPayload(payload) {
   };
 }
 
+function routeFromPayload(payload, source = {}) {
+  const configured = ROUTES.find((item) => item.key === payload.group);
+  if (configured) return configured;
+  if (!payload.group) return null;
+
+  return {
+    key: payload.group,
+    label: payload.group,
+    channel: source.channel_id || payload.channel_id || "",
+    filter: payload.group,
+  };
+}
+
 function localDateFromIso(iso) {
   return DateTime.fromISO(iso, { zone: "utc" }).setZone(TZ).toISODate();
 }
@@ -1594,7 +1607,8 @@ async function main() {
     await ack();
     const action = body.actions?.[0];
     const payload = JSON.parse(action?.value || "{}");
-    const route = ROUTES.find((item) => item.key === payload.group);
+    const source = sourceFromBody(body, payload);
+    const route = routeFromPayload(payload, source);
     if (!payload.event_uid || !route || !body.trigger_id) return;
 
     await client.views.open({
@@ -1602,14 +1616,15 @@ async function main() {
       view: availabilityModal(
         eventFromPayload(payload),
         route,
-        sourceFromBody(body, payload),
+        source,
       ),
     });
   });
 
   slack.view("availability_submit", async ({ ack, body, view, client }) => {
     const payload = JSON.parse(view.private_metadata || "{}");
-    const route = ROUTES.find((item) => item.key === payload.group);
+    const source = sourceFromBody({}, payload);
+    const route = routeFromPayload(payload, source);
     const userId = body.user?.id;
     const status = selectedViewValue(view, "availability_status");
     const weekday = selectedViewValue(view, "availability_weekday");
@@ -1631,7 +1646,6 @@ async function main() {
     if (!userId || !route || !weekday) return;
 
     const event = eventFromPayload(payload);
-    const source = sourceFromBody({}, payload);
     const name = await slackName(client, userId, body.user?.name);
     const active = status !== "available";
     const row = await upsertAvailabilityRule({
@@ -1671,10 +1685,10 @@ async function main() {
     const action = body.actions?.[0];
     const payload = JSON.parse(action?.value || "{}");
     const userId = body.user?.id;
-    const route = ROUTES.find((item) => item.key === payload.group);
+    const source = sourceFromBody(body, payload);
+    const route = routeFromPayload(payload, source);
     if (!payload.event_uid || !route || !userId) return;
 
-    const source = sourceFromBody(body, payload);
     const event = eventFromPayload(payload);
 
     if (action?.action_id === "sheet_attendance_change") {
